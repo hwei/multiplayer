@@ -73,17 +73,27 @@ public class NetworkStreamReceiveSystem : JobComponentSystem
         }
         var ent = EntityManager.CreateEntity();
         EntityManager.AddComponentData(ent, new NetworkStreamConnection {Value = m_Driver.Connect(endpoint)});
+        EntityManager.AddComponentData(ent, new NetworkStreamConnecting());
         EntityManager.AddComponentData(ent, new NetworkSnapshotAckComponent());
         EntityManager.AddComponentData(ent, new CommandTargetComponent());
         EntityManager.AddBuffer<IncomingRpcDataStreamBufferComponent>(ent);
         EntityManager.AddBuffer<OutgoingRpcDataStreamBufferComponent>(ent);
         EntityManager.AddBuffer<IncomingCommandDataStreamBufferComponent>(ent);
         EntityManager.AddBuffer<IncomingSnapshotDataStreamBufferComponent>(ent);
+#if UNITY_EDITOR
+        EntityManager.SetName(ent, "connection");
+#endif
         return ent;
     }
 
     protected override void OnCreateManager()
     {
+        var timeoutParams = new NetworkConfigParameter
+        {
+            connectTimeoutMS = 1000,
+            maxConnectAttempts = 60,
+            disconnectTimeoutMS = 5 * 1000,
+        };
         var reliabilityParams = new ReliableUtility.Parameters {WindowSize = 32};
 
         #if UNITY_EDITOR
@@ -94,9 +104,9 @@ public class NetworkStreamReceiveSystem : JobComponentSystem
         int maxPackets = 2*(networkRate * 3 * m_ClientPacketDelay + 999) / 1000;
         var simulatorParams = new SimulatorUtility.Parameters
             {MaxPacketSize = NetworkParameterConstants.MTU, MaxPacketCount = maxPackets, PacketDelayMs = m_ClientPacketDelay, PacketDropPercentage = m_ClientPacketDrop};
-        m_Driver = new UdpNetworkDriver(simulatorParams, reliabilityParams);
+        m_Driver = new UdpNetworkDriver(simulatorParams, reliabilityParams, timeoutParams);
         #else
-        m_Driver = new UdpNetworkDriver(reliabilityParams);
+        m_Driver = new UdpNetworkDriver(reliabilityParams, timeoutParams);
         #endif
 
         m_ConcurrentDriver = m_Driver.ToConcurrent();
@@ -195,6 +205,7 @@ public class NetworkStreamReceiveSystem : JobComponentSystem
                 switch (evt)
                 {
                 case NetworkEvent.Type.Connect:
+                    commandBuffer.RemoveComponent<NetworkStreamConnecting>(index, entity);
                     break;
                 case NetworkEvent.Type.Disconnect:
                     // Flag the connection as lost, it will be deleted in a separate system, giving user code one frame to detect and respond to lost connection

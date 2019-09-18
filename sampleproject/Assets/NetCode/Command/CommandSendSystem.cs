@@ -11,7 +11,7 @@ using Unity.Networking.Transport.LowLevel.Unsafe;
 public class CommandSendSystem<TCommandData> : JobComponentSystem
     where TCommandData : struct, ICommandData<TCommandData>
 {
-    [ExcludeComponent(typeof(NetworkStreamDisconnected))]
+    [ExcludeComponent(typeof(NetworkStreamDisconnected), typeof(NetworkStreamConnecting))]
     struct CommandSendJob : IJobForEachWithEntity<CommandTargetComponent>
     {
         public UdpNetworkDriver.Concurrent driver;
