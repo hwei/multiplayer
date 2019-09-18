@@ -1,3 +1,4 @@
+#if !UNITY_SERVER && !UNITY_CLIENT
 using System;
 using Unity.Collections;
 using Unity.Entities;
@@ -194,3 +195,4 @@ public class MultiplayerPlayModeControllerSystem : ComponentSystem
         }
     }
 }
+#endif
