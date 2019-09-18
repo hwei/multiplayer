@@ -87,6 +87,7 @@ public class ClientSimulationSystemGroup : ComponentSystemGroup
 {
     private BeginSimulationEntityCommandBufferSystem m_beginBarrier;
     private EndSimulationEntityCommandBufferSystem m_endBarrier;
+    private GhostSpawnInitSystemGroup m_ghostSpawnInitGroup;
     private GhostSpawnSystemGroup m_ghostSpawnGroup;
 #if UNITY_EDITOR
     public int ClientWorldIndex { get; internal set; }
@@ -99,6 +100,7 @@ public class ClientSimulationSystemGroup : ComponentSystemGroup
     {
         m_beginBarrier = World.GetOrCreateSystem<BeginSimulationEntityCommandBufferSystem>();
         m_endBarrier = World.GetOrCreateSystem<EndSimulationEntityCommandBufferSystem>();
+        m_ghostSpawnInitGroup = World.GetOrCreateSystem<GhostSpawnInitSystemGroup>();
         m_ghostSpawnGroup = World.GetOrCreateSystem<GhostSpawnSystemGroup>();
     }
 
@@ -114,6 +116,7 @@ public class ClientSimulationSystemGroup : ComponentSystemGroup
         while (m_fixedTimeLoop.ShouldUpdate())
         {
             m_beginBarrier.Update();
+            m_ghostSpawnInitGroup.Update();
             m_ghostSpawnGroup.Update();
             base.OnUpdate();
             m_endBarrier.Update();
@@ -127,6 +130,7 @@ public class ClientSimulationSystemGroup : ComponentSystemGroup
         base.SortSystemUpdateList();
         m_systemsInGroup = new List<ComponentSystemBase>(1 + m_systemsToUpdate.Count + 1);
         m_systemsInGroup.Add(m_beginBarrier);
+        m_systemsInGroup.Add(m_ghostSpawnInitGroup);
         m_systemsInGroup.Add(m_ghostSpawnGroup);
         m_systemsInGroup.AddRange(m_systemsToUpdate);
         m_systemsInGroup.Add(m_endBarrier);
@@ -327,6 +331,10 @@ public class ClientServerBootstrap : ICustomBootstrap
             return systems;
 #endif
 
+#if UNITY_EDITOR
+        int playModeType = UnityEditor.EditorPrefs.GetInt("MultiplayerPlayMode_" + UnityEngine.Application.productName + "_Type");
+#endif
+        
 #if !UNITY_SERVER
 #if UNITY_EDITOR
         int numClientWorlds = UnityEditor.EditorPrefs.GetInt("MultiplayerPlayMode_" + UnityEngine.Application.productName + "_NumClients");
@@ -334,7 +342,6 @@ public class ClientServerBootstrap : ICustomBootstrap
             numClientWorlds = 1;
         if (numClientWorlds > 8)
             numClientWorlds = 8;
-        int playModeType = UnityEditor.EditorPrefs.GetInt("MultiplayerPlayMode_" + UnityEngine.Application.productName + "_Type");
 #else
         int numClientWorlds = 1;
 #endif

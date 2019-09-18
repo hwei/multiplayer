@@ -10,9 +10,7 @@ using Unity.Networking.Transport.Utilities;
 internal struct GhostEntity
 {
     public Entity entity;
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
     public int ghostType;
-#endif
 }
 
 [AlwaysUpdateSystem]
@@ -33,13 +31,17 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
     }
 
     private NativeHashMap<int, GhostEntity> m_ghostEntityMap;
+    private NativeList<GhostReceiveSystemGroup.GhostRemove> m_GhostRemoveList;
     private BeginSimulationEntityCommandBufferSystem m_Barrier;
+    private GhostReceiveSystemGroup m_GhostReceiveSystemGroup;
 
     private NativeQueue<DelayedDespawnGhost> m_DelayedDespawnQueue;
     protected override void OnCreateManager()
     {
         serializers = default(TGhostDeserializerCollection);
-        m_ghostEntityMap = World.GetOrCreateSystem<GhostReceiveSystemGroup>().GhostEntityMap;
+        m_GhostReceiveSystemGroup = World.GetOrCreateSystem<GhostReceiveSystemGroup>();
+        m_ghostEntityMap = m_GhostReceiveSystemGroup.GhostEntityMap;
+        m_GhostRemoveList = m_GhostReceiveSystemGroup.GhostRemoveList;
 
         playerGroup = GetEntityQuery(
             ComponentType.ReadWrite<NetworkStreamConnection>(),
@@ -88,8 +90,21 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
     struct ClearMapJob : IJob
     {
         public NativeHashMap<int, GhostEntity> ghostMap;
+        public NativeList<GhostReceiveSystemGroup.GhostRemove> ghostRemoveList;
         public void Execute()
         {
+            var ghostIdArray = ghostMap.GetKeyArray(Allocator.Temp);
+            for (var i = 0; i < ghostIdArray.Length; ++i)
+            {
+                var ghostId = ghostIdArray[i];
+                var ghostEntity = ghostMap[ghostId];
+                ghostRemoveList.Add(new GhostReceiveSystemGroup.GhostRemove
+                {
+                    GhostId = ghostId,
+                    GhostType = ghostEntity.ghostType,
+                });
+            }
+            ghostIdArray.Dispose();
             ghostMap.Clear();
         }
     }
@@ -102,6 +117,7 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
         public BufferFromEntity<IncomingSnapshotDataStreamBufferComponent> snapshotFromEntity;
         public ComponentDataFromEntity<NetworkSnapshotAckComponent> snapshotAckFromEntity;
         public NativeHashMap<int, GhostEntity> ghostEntityMap;
+        public NativeList<GhostReceiveSystemGroup.GhostRemove> ghostRemoveList;
         public NetworkCompressionModel compressionModel;
         public TGhostDeserializerCollection serializers;
         #if ENABLE_UNITY_COLLECTIONS_CHECKS
@@ -164,6 +180,11 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
                     continue;
 
                 ghostEntityMap.Remove(ghostId);
+                ghostRemoveList.Add(new GhostReceiveSystemGroup.GhostRemove
+                {
+                    GhostId = ghostId,
+                    GhostType = ent.ghostType,
+                });
                 // if predicted, despawn now, otherwise wait
                 if (predictedFromEntity.Exists(ent.entity))
                     commandBuffer.RemoveComponent(ent.entity, replicatedEntityType);
@@ -225,7 +246,8 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
                     if (gent.ghostType != targetArch)
                         throw new InvalidOperationException("Received a ghost with an invalid ghost type");
-                        //throw new InvalidOperationException("Received a ghost with an invalid ghost type " + targetArch + ", expected " + gent.ghostType);
+                    //burst does not support string concat
+                    //throw new InvalidOperationException("Received a ghost with an invalid ghost type " + targetArch + ", expected " + gent.ghostType);
 #endif
                     serializers.Deserialize((int) targetArch, gent.entity, serverTick, baselineTick, baselineTick2, baselineTick3,
                         dataStream, ref readCtx, compressionModel);
@@ -268,9 +290,11 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
             m_DelayedDespawnQueue.Clear();
             var clearMapJob = new ClearMapJob
             {
-                ghostMap = m_ghostEntityMap
+                ghostMap = m_ghostEntityMap,
+                ghostRemoveList = m_GhostRemoveList,
             };
             var clearHandle = clearMapJob.Schedule(inputDeps);
+            m_GhostReceiveSystemGroup.AddJobHandleForGhostRemoveListProducer(clearHandle);
             var clearJob = new ClearGhostsJob
             {
                 commandBuffer = commandBuffer.ToConcurrent()
@@ -289,6 +313,7 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
             snapshotFromEntity = GetBufferFromEntity<IncomingSnapshotDataStreamBufferComponent>(),
             snapshotAckFromEntity = GetComponentDataFromEntity<NetworkSnapshotAckComponent>(),
             ghostEntityMap = m_ghostEntityMap,
+            ghostRemoveList = m_GhostRemoveList,
             compressionModel = m_CompressionModel,
             serializers = serializers,
             #if ENABLE_UNITY_COLLECTIONS_CHECKS
@@ -302,6 +327,7 @@ public class GhostReceiveSystem<TGhostDeserializerCollection> : JobComponentSyst
         inputDeps = readJob.Schedule(JobHandle.CombineDependencies(inputDeps, playerHandle));
 
         m_Barrier.AddJobHandleForProducer(inputDeps);
+        m_GhostReceiveSystemGroup.AddJobHandleForGhostRemoveListProducer(inputDeps);
         return inputDeps;
     }
 
