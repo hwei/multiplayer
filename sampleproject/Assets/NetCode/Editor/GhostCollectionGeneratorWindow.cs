@@ -306,7 +306,7 @@ public class /*$GHOST_SYSTEM_PREFIX*/GhostReceiveSystem : GhostReceiveSystem<Gho
                 .Replace("/*$GHOST_INVOKE_SPAWN*/", ghostInvokeSpawn)
                 .Replace("/*$GHOST_SERIALIZER_COUNT*/", m_GhostTypes.Count.ToString())
                 .Replace("/*$GHOST_COLLECTION_PREFIX*/", "")
-                .Replace("/*$GHOST_SYSTEM_PREFIX*/", Application.productName);
+                .Replace("/*$GHOST_SYSTEM_PREFIX*/", Application.productName.Replace(" ", ""));
             string deserializerContent = GhostDeserializerCollectionTemplate
                 .Replace("/*$GHOST_SERIALIZER_INSTANCES*/", ghostSerializerInst)
                 .Replace("/*$GHOST_DESERIALIZER_INSTANCES*/", ghostDeserializerInst)
@@ -323,7 +323,7 @@ public class /*$GHOST_SYSTEM_PREFIX*/GhostReceiveSystem : GhostReceiveSystem<Gho
                 .Replace("/*$GHOST_INVOKE_SPAWN*/", ghostInvokeSpawn)
                 .Replace("/*$GHOST_SERIALIZER_COUNT*/", m_GhostTypes.Count.ToString())
                 .Replace("/*$GHOST_COLLECTION_PREFIX*/", "")
-                .Replace("/*$GHOST_SYSTEM_PREFIX*/", Application.productName);
+                .Replace("/*$GHOST_SYSTEM_PREFIX*/", Application.productName.Replace(" ", ""));
             File.WriteAllText(serializerFile, serializerContent);
             File.WriteAllText(deserializerFile, deserializerContent);
         }
