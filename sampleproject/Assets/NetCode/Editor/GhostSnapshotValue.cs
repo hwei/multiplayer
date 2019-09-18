@@ -95,7 +95,7 @@ class GhostSnapshotValueQuaternion : GhostSnapshotValue
 
     private const string k_SnapshotQuaternionFieldGetSetTemplate = @"    public quaternion Get$(GHOSTFIELD)()
     {
-        return new quaternion($(GHOSTFIELD)X, $(GHOSTFIELD)Y, $(GHOSTFIELD)Z, $(GHOSTFIELD)W) * $(GHOSTDEQUANT);
+        return new quaternion(new float4($(GHOSTFIELD)X, $(GHOSTFIELD)Y, $(GHOSTFIELD)Z, $(GHOSTFIELD)W) * $(GHOSTDEQUANT));
     }
     public void Set$(GHOSTFIELD)(quaternion q)
     {
