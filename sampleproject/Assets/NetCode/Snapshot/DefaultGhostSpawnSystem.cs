@@ -296,9 +296,9 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
                 EntityManager.DestroyEntity(m_GhostSpawnSystem.m_InvalidGhosts);
                 m_GhostSpawnSystem.m_InvalidGhosts.Clear();
             }
-                
 
-            var targetTick = NetworkTimeSystem.interpolateTargetTick;
+
+            var targetTick = m_GhostSpawnSystem.m_TimeSystem.interpolateTargetTick;
             m_GhostSpawnSystem.m_CurrentDelayedSpawnList.Clear();
             while (m_GhostSpawnSystem.m_DelayedSpawnQueue.Count > 0 &&
                    !SequenceHelpers.IsNewer(m_GhostSpawnSystem.m_DelayedSpawnQueue.Peek().spawnTick, targetTick))
@@ -323,8 +323,8 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
                 }
             }
 
-            var prefabs = m_PrefabGroup.ToComponentDataArray<GhostClientPrefabComponent>(Allocator.TempJob);
-            
+            var prefabs = m_GhostSpawnSystem.m_PrefabGroup.ToComponentDataArray<GhostClientPrefabComponent>(Allocator.TempJob);
+
             if (m_GhostSpawnSystem.m_CurrentDelayedSpawnList.Length > 0)
             {
                 delayedEntities = new NativeArray<Entity>(
@@ -381,7 +381,7 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
 
             newGhostsChangeHandle.Complete();
             newGhostsChangeHandle = default;
-            
+
             if (m_GhostSpawnSystem.m_NewGhosts.Length > 0)
             {
                 newEntities = new NativeArray<Entity>(
