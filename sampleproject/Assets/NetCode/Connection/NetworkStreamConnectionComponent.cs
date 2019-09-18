@@ -16,6 +16,10 @@ public struct NetworkStreamConnection : IComponentData
     public NetworkConnection Value;
 }
 
+public struct NetworkStreamConnecting : IComponentData
+{
+}
+
 public struct NetworkStreamInGame : IComponentData
 {
 }
