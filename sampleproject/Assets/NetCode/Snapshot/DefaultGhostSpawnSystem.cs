@@ -4,6 +4,7 @@ using Unity.Collections;
 using Unity.Entities;
 using Unity.Jobs;
 using Unity.Networking.Transport.Utilities;
+using UnityEngine;
 
 [UpdateInGroup(typeof(GhostSpawnSystemGroup))]
 [AlwaysUpdateSystem]
@@ -13,6 +14,21 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
     public int GhostType { get; set; }
     public NativeList<T> NewGhosts => m_NewGhosts;
     public NativeList<int> NewGhostIds => m_NewGhostIds;
+
+    public NativeQueue<T> SpawnRequestQueue => m_SpawnRequestQueue;
+
+    public void SetSpawnRequestQueueProducer(JobHandle producerHandle)
+    {
+        if (!m_SpawnRequestQueueProducerHandle.IsCompleted)
+        {
+            Debug.LogWarning("m_SpawnRequestQueueProducerHandle set multiple times in one update loop");
+            m_SpawnRequestQueueProducerHandle.Complete();
+        }
+
+        m_SpawnRequestQueueProducerHandle = producerHandle;
+    }
+    
+    
     private NativeList<T> m_NewGhosts;
     private NativeList<int> m_NewGhostIds;
     private EntityArchetype m_Archetype;
@@ -21,7 +37,8 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
     private NativeHashMap<int, GhostEntity> m_GhostMap;
     private NativeHashMap<int, GhostEntity>.Concurrent m_ConcurrentGhostMap;
     private EntityQuery m_DestroyGroup;
-    private EntityQuery m_SpawnRequestGroup;
+    private JobHandle m_SpawnRequestQueueProducerHandle;
+    private NativeQueue<T> m_SpawnRequestQueue;
 
     private NativeList<Entity> m_InvalidGhosts;
 
@@ -49,6 +66,9 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
     private NativeList<DelayedSpawnGhost> m_CurrentPredictedSpawnList;
     private EndSimulationEntityCommandBufferSystem m_Barrier;
 
+    private GhostSpawnInitSystem m_GhostSpawnInitSystem;
+    private GhostReceiveSystemGroup m_GhostReceiveSystemGroup;
+
     protected abstract EntityArchetype GetGhostArchetype();
     protected abstract EntityArchetype GetPredictedGhostArchetype();
 
@@ -74,13 +94,10 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
         m_Archetype = GetGhostArchetype();
         m_PredictedArchetype = GetPredictedGhostArchetype();
         m_InitialArchetype = EntityManager.CreateArchetype(ComponentType.ReadWrite<T>(), ComponentType.ReadWrite<ReplicatedEntityComponent>());
-
-        m_GhostMap = World.GetOrCreateSystem<GhostReceiveSystemGroup>().GhostEntityMap;
-        m_ConcurrentGhostMap = m_GhostMap.ToConcurrent();
+        
         m_DestroyGroup = GetEntityQuery(ComponentType.ReadOnly<T>(),
             ComponentType.Exclude<ReplicatedEntityComponent>(), ComponentType.Exclude<PredictedSpawnRequestComponent>());
-        m_SpawnRequestGroup = GetEntityQuery(ComponentType.ReadOnly<T>(),
-            ComponentType.ReadOnly<PredictedSpawnRequestComponent>());
+        m_SpawnRequestQueue = new NativeQueue<T>(Allocator.Persistent);
 
         m_InvalidGhosts = new NativeList<Entity>(1024, Allocator.Persistent);
         m_DelayedSpawnQueue = new NativeQueue<DelayedSpawnGhost>(Allocator.Persistent);
@@ -93,13 +110,19 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
         
         m_PredictSpawnGhosts = new NativeList<PredictSpawnGhost>(16, Allocator.Persistent);
         m_PredictionSpawnCleanupMap = new NativeHashMap<int, int>(16, Allocator.Persistent);
+
+        m_GhostSpawnInitSystem = World.CreateSystem<GhostSpawnInitSystem>(this);
+        World.GetOrCreateSystem<GhostSpawnInitSystemGroup>().AddSystemToUpdateList(m_GhostSpawnInitSystem);
+        m_GhostReceiveSystemGroup = World.GetExistingSystem<GhostReceiveSystemGroup>();
     }
 
     protected override void OnDestroyManager()
     {
         m_NewGhosts.Dispose();
         m_NewGhostIds.Dispose();
-
+        
+        m_SpawnRequestQueue.Dispose();
+        
         m_InvalidGhosts.Dispose();
         m_DelayedSpawnQueue.Dispose();
         m_CurrentDelayedSpawnList.Dispose();
@@ -113,7 +136,7 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
     [BurstCompile]
     struct CopyInitialStateJob : IJobParallelFor
     {
-        [ReadOnly] public NativeArray<Entity> entities;
+        [DeallocateOnJobCompletion] [ReadOnly] public NativeArray<Entity> entities;
         [ReadOnly] public NativeList<T> newGhosts;
         [ReadOnly] public NativeList<int> newGhostIds;
         [NativeDisableParallelForRestriction] public BufferFromEntity<T> snapshotFromEntity;
@@ -149,9 +172,7 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
             ghostMap.TryAdd(newGhostIds[i], new GhostEntity
             {
                 entity = entity,
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
                 ghostType = ghostType
-#endif
             });
         }
     }
@@ -177,21 +198,24 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
                 ghostMap.TryAdd(delayedGhost[i].ghostId, new GhostEntity
                 {
                     entity = entities[i],
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
                     ghostType = ghostType
-#endif
                 });
             }
         }
     }
+
+    [BurstCompile]
+    struct DeallocateJob : IJob
+    {
+        [DeallocateOnJobCompletion] [ReadOnly] public NativeArray<Entity> array;
+        public void Execute()
+        {
+        }
+    }
+
     [BurstCompile]
     struct ClearNewJob : IJob
     {
-        [DeallocateOnJobCompletion] public NativeArray<Entity> entities;
-        [DeallocateOnJobCompletion] public NativeArray<Entity> visibleEntities;
-        [DeallocateOnJobCompletion] public NativeArray<Entity> visiblePredictedEntities;
-        [DeallocateOnJobCompletion] public NativeArray<Entity> predictSpawnEntities;
-        [DeallocateOnJobCompletion] public NativeArray<Entity> predictSpawnRequests;
         public NativeList<T> newGhosts;
         public NativeList<int> newGhostIds;
         public void Execute()
@@ -201,26 +225,6 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
         }
     }
 
-    struct PredictSpawnJob : IJob
-    {
-        public NativeArray<Entity> requests;
-        public NativeArray<Entity> entities;
-        public BufferFromEntity<T> snapshotFromEntity;
-        public EntityCommandBuffer commandBuffer;
-        public NativeList<PredictSpawnGhost> predictSpawnGhosts;
-        public void Execute()
-        {
-            for (int i = 0; i < requests.Length; ++i)
-            {
-                var srcSnap = snapshotFromEntity[requests[i]];
-                var dstSnap = snapshotFromEntity[entities[i]];
-                dstSnap.ResizeUninitialized(1);
-                dstSnap[0] = srcSnap[0];
-                commandBuffer.DestroyEntity(requests[i]);
-                predictSpawnGhosts.Add(new PredictSpawnGhost {snapshotData = srcSnap[0], entity = entities[i]});
-            }
-        }
-    }
     [BurstCompile]
     struct PredictSpawnCleanupJob : IJob
     {
@@ -252,96 +256,158 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
         }
     }
 
+    private class GhostSpawnInitSystem: ComponentSystem
+    {
+        private readonly DefaultGhostSpawnSystem<T> m_GhostSpawnSystem;
+        public NativeArray<Entity> delayedEntities;
+        public NativeArray<Entity> predictedEntities;
+        public NativeArray<Entity> predictSpawnEntities;
+        public NativeArray<Entity> newEntities;
+        public JobHandle newGhostsChangeHandle;
+
+        public GhostSpawnInitSystem(DefaultGhostSpawnSystem<T> ghostSpawnSystem)
+        {
+            m_GhostSpawnSystem = ghostSpawnSystem;
+        }
+
+        protected override void OnUpdate()
+        {
+            if (!m_GhostSpawnSystem.m_GhostMap.IsCreated)
+            {
+                //Debug.LogFormat("GhostMap initialize {0} {1}", GetType(), m_GhostSpawnSystem.GhostType);
+                m_GhostSpawnSystem.m_GhostMap = m_GhostSpawnSystem.m_GhostReceiveSystemGroup
+                    .GetGhostEntityMap(m_GhostSpawnSystem.GhostType);
+                m_GhostSpawnSystem.m_ConcurrentGhostMap = m_GhostSpawnSystem.m_GhostMap.ToConcurrent();
+            }
+
+            if (!m_GhostSpawnSystem.m_DestroyGroup.IsEmptyIgnoreFilter)
+            {
+                EntityManager.DestroyEntity(m_GhostSpawnSystem.m_DestroyGroup);
+            }
+                
+            if (m_GhostSpawnSystem.m_InvalidGhosts.Length > 0)
+            {
+                EntityManager.DestroyEntity(m_GhostSpawnSystem.m_InvalidGhosts);
+                m_GhostSpawnSystem.m_InvalidGhosts.Clear();
+            }
+                
+
+            var targetTick = NetworkTimeSystem.interpolateTargetTick;
+            m_GhostSpawnSystem.m_CurrentDelayedSpawnList.Clear();
+            while (m_GhostSpawnSystem.m_DelayedSpawnQueue.Count > 0 &&
+                   !SequenceHelpers.IsNewer(m_GhostSpawnSystem.m_DelayedSpawnQueue.Peek().spawnTick, targetTick))
+            {
+                var ghost = m_GhostSpawnSystem.m_DelayedSpawnQueue.Dequeue();
+                GhostEntity gent;
+                if (m_GhostSpawnSystem.m_GhostMap.TryGetValue(ghost.ghostId, out gent))
+                {
+                    m_GhostSpawnSystem.m_CurrentDelayedSpawnList.Add(ghost);
+                    m_GhostSpawnSystem.m_InvalidGhosts.Add(gent.entity);
+                }
+            }
+            m_GhostSpawnSystem.m_CurrentPredictedSpawnList.Clear();
+            while (m_GhostSpawnSystem.m_PredictedSpawnQueue.Count > 0)
+            {
+                var ghost = m_GhostSpawnSystem.m_PredictedSpawnQueue.Dequeue();
+                GhostEntity gent;
+                if (m_GhostSpawnSystem.m_GhostMap.TryGetValue(ghost.ghostId, out gent))
+                {
+                    m_GhostSpawnSystem.m_CurrentPredictedSpawnList.Add(ghost);
+                    m_GhostSpawnSystem.m_InvalidGhosts.Add(gent.entity);
+                }
+            }
+            
+            if (m_GhostSpawnSystem.m_CurrentDelayedSpawnList.Length > 0)
+            {
+                delayedEntities = new NativeArray<Entity>(
+                    m_GhostSpawnSystem.m_CurrentDelayedSpawnList.Length,
+                    Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+                EntityManager.CreateEntity(m_GhostSpawnSystem.m_Archetype, delayedEntities);
+            }
+            
+            if (m_GhostSpawnSystem.m_CurrentPredictedSpawnList.Length > 0)
+            {
+                predictedEntities = new NativeArray<Entity>(
+                    m_GhostSpawnSystem.m_CurrentPredictedSpawnList.Length,
+                    Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+                EntityManager.CreateEntity(m_GhostSpawnSystem.m_PredictedArchetype, predictedEntities);
+            }
+
+            {
+                m_GhostSpawnSystem.m_SpawnRequestQueueProducerHandle.Complete();
+                m_GhostSpawnSystem.m_SpawnRequestQueueProducerHandle = default;
+                var spawnRequestQueue = m_GhostSpawnSystem.m_SpawnRequestQueue;
+                if (spawnRequestQueue.Count > 0)
+                {
+                    predictSpawnEntities = new NativeArray<Entity>(
+                        spawnRequestQueue.Count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+                    var i = 0;
+                    while (spawnRequestQueue.Count > 0)
+                    {
+                        var spawnRequest = spawnRequestQueue.Dequeue();
+                        var entity = EntityManager.CreateEntity(m_GhostSpawnSystem.m_PredictedArchetype);
+                        var buffer = EntityManager.GetBuffer<T>(entity);
+                        buffer.ResizeUninitialized(1);
+                        buffer[0] = spawnRequest;
+                        predictSpawnEntities[i++] = entity;
+                        m_GhostSpawnSystem.m_PredictSpawnGhosts.Add(new PredictSpawnGhost {snapshotData = spawnRequest, entity = entity});
+                    }
+                }
+                else
+                {
+                    predictSpawnEntities = default;
+                }
+            }
+
+            newGhostsChangeHandle.Complete();
+            newGhostsChangeHandle = default;
+            
+            if (m_GhostSpawnSystem.m_NewGhosts.Length > 0)
+            {
+                newEntities = new NativeArray<Entity>(
+                    m_GhostSpawnSystem.m_NewGhosts.Length, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+                EntityManager.CreateEntity(m_GhostSpawnSystem.m_InitialArchetype, newEntities);
+            }
+        }
+    }
+
     protected override JobHandle OnUpdate(JobHandle inputDeps)
     {
-        EntityManager.DestroyEntity(m_DestroyGroup);
-        EntityManager.DestroyEntity(m_InvalidGhosts);
-        m_InvalidGhosts.Clear();
-
-        var targetTick = NetworkTimeSystem.interpolateTargetTick;
-        m_CurrentDelayedSpawnList.Clear();
-        while (m_DelayedSpawnQueue.Count > 0 &&
-               !SequenceHelpers.IsNewer(m_DelayedSpawnQueue.Peek().spawnTick, targetTick))
-        {
-            var ghost = m_DelayedSpawnQueue.Dequeue();
-            GhostEntity gent;
-            if (m_GhostMap.TryGetValue(ghost.ghostId, out gent))
-            {
-                m_CurrentDelayedSpawnList.Add(ghost);
-                m_InvalidGhosts.Add(gent.entity);
-            }
-        }
-        m_CurrentPredictedSpawnList.Clear();
-        while (m_PredictedSpawnQueue.Count > 0)
-        {
-            var ghost = m_PredictedSpawnQueue.Dequeue();
-            GhostEntity gent;
-            if (m_GhostMap.TryGetValue(ghost.ghostId, out gent))
-            {
-                m_CurrentPredictedSpawnList.Add(ghost);
-                m_InvalidGhosts.Add(gent.entity);
-            }
-        }
-
-        var delayedEntities = default(NativeArray<Entity>);
-        delayedEntities = new NativeArray<Entity>(m_CurrentDelayedSpawnList.Length, Allocator.TempJob);
-        if (m_CurrentDelayedSpawnList.Length > 0)
-            EntityManager.CreateEntity(m_Archetype, delayedEntities);
-
-        var predictedEntities = default(NativeArray<Entity>);
-        predictedEntities = new NativeArray<Entity>(m_CurrentPredictedSpawnList.Length, Allocator.TempJob);
-        if (m_CurrentPredictedSpawnList.Length > 0)
-            EntityManager.CreateEntity(m_PredictedArchetype, predictedEntities);
-
-        var predictSpawnRequests = m_SpawnRequestGroup.ToEntityArray(Allocator.TempJob);
-        var predictSpawnEntities = new NativeArray<Entity>(predictSpawnRequests.Length, Allocator.TempJob);
-        if (predictSpawnEntities.Length > 0)
-            EntityManager.CreateEntity(m_PredictedArchetype, predictSpawnEntities);
-
-        var newEntities = default(NativeArray<Entity>);
-        newEntities = new NativeArray<Entity>(m_NewGhosts.Length, Allocator.TempJob);
-        if (m_NewGhosts.Length > 0)
-            EntityManager.CreateEntity(m_InitialArchetype, newEntities);
-
         if (m_CurrentDelayedSpawnList.Length > 0)
         {
             var delayedjob = new DelayedSpawnJob
             {
-                entities = delayedEntities,
+                entities = m_GhostSpawnInitSystem.delayedEntities,
                 delayedGhost = m_CurrentDelayedSpawnList,
                 snapshotFromEntity = GetBufferFromEntity<T>(),
                 ghostMap = m_GhostMap,
                 ghostType = GhostType
             };
             inputDeps = delayedjob.Schedule(inputDeps);
-            inputDeps = UpdateNewInterpolatedEntities(delayedEntities, inputDeps);
+            m_GhostReceiveSystemGroup.AddJobHandleForGhostEntityMapProducer(inputDeps);
+            inputDeps = UpdateNewInterpolatedEntities(m_GhostSpawnInitSystem.delayedEntities, inputDeps);
+            new DeallocateJob {array = m_GhostSpawnInitSystem.delayedEntities}.Schedule(inputDeps);
         }
         // FIXME: current and predicted can run in parallel I think
         if (m_CurrentPredictedSpawnList.Length > 0)
         {
             var delayedjob = new DelayedSpawnJob
             {
-                entities = predictedEntities,
+                entities = m_GhostSpawnInitSystem.predictedEntities,
                 delayedGhost = m_CurrentPredictedSpawnList,
                 snapshotFromEntity = GetBufferFromEntity<T>(),
                 ghostMap = m_GhostMap,
                 ghostType = GhostType
             };
             inputDeps = delayedjob.Schedule(inputDeps);
-            inputDeps = UpdateNewPredictedEntities(predictedEntities, inputDeps);
+            m_GhostReceiveSystemGroup.AddJobHandleForGhostEntityMapProducer(inputDeps);
+            inputDeps = UpdateNewPredictedEntities(m_GhostSpawnInitSystem.predictedEntities, inputDeps);
+            new DeallocateJob {array = m_GhostSpawnInitSystem.predictedEntities}.Schedule(inputDeps);
         }
-        if (predictSpawnRequests.Length > 0)
+        if (m_GhostSpawnInitSystem.predictSpawnEntities.IsCreated)
         {
-            var spawnJob = new PredictSpawnJob
-            {
-                requests = predictSpawnRequests,
-                entities = predictSpawnEntities,
-                snapshotFromEntity = GetBufferFromEntity<T>(),
-                commandBuffer = m_Barrier.CreateCommandBuffer(),
-                predictSpawnGhosts = m_PredictSpawnGhosts
-            };
-            inputDeps = spawnJob.Schedule(inputDeps);
-            inputDeps = UpdateNewPredictedEntities(predictSpawnEntities, inputDeps);
+            inputDeps = UpdateNewPredictedEntities(m_GhostSpawnInitSystem.predictSpawnEntities, inputDeps);
+            new DeallocateJob {array = m_GhostSpawnInitSystem.predictSpawnEntities}.Schedule(inputDeps);
         }
 
         m_PredictionSpawnCleanupMap.Clear();
@@ -353,7 +419,7 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
             inputDeps = MarkPredictedGhosts(m_NewGhosts, predictionMask, m_PredictSpawnGhosts, inputDeps);
             var job = new CopyInitialStateJob
             {
-                entities = newEntities,
+                entities = m_GhostSpawnInitSystem.newEntities,
                 newGhosts = m_NewGhosts,
                 newGhostIds = m_NewGhostIds,
                 snapshotFromEntity = GetBufferFromEntity<T>(),
@@ -366,9 +432,12 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
                 predictionSpawnCleanupMap = m_PredictionSpawnCleanupMap.ToConcurrent(),
                 commandBuffer = m_Barrier.CreateCommandBuffer().ToConcurrent()
             };
-            inputDeps = job.Schedule(newEntities.Length, 8, inputDeps);
+            inputDeps = job.Schedule(m_GhostSpawnInitSystem.newEntities.Length, 8, inputDeps);
+            m_GhostReceiveSystemGroup.AddJobHandleForGhostEntityMapProducer(inputDeps);
+            m_Barrier.AddJobHandleForProducer(inputDeps);
         }
 
+        var targetTick = NetworkTimeSystem.interpolateTargetTick;
         var spawnClearJob = new PredictSpawnCleanupJob
         {
             predictionSpawnCleanupMap = m_PredictionSpawnCleanupMap,
@@ -380,17 +449,18 @@ public abstract class DefaultGhostSpawnSystem<T> : JobComponentSystem
         inputDeps = spawnClearJob.Schedule(inputDeps);
         m_Barrier.AddJobHandleForProducer(inputDeps);
 
-        var clearJob = new ClearNewJob
+        if (m_NewGhosts.Length > 0 || m_NewGhostIds.Length > 0)
         {
-            entities = newEntities,
-            visibleEntities = delayedEntities,
-            visiblePredictedEntities = predictedEntities,
-            newGhosts = m_NewGhosts,
-            newGhostIds = m_NewGhostIds,
-            predictSpawnEntities = predictSpawnEntities,
-            predictSpawnRequests = predictSpawnRequests
-        };
-        return clearJob.Schedule(inputDeps);
+            var clearJob = new ClearNewJob
+            {
+                newGhosts = m_NewGhosts,
+                newGhostIds = m_NewGhostIds,
+            };
+            inputDeps = clearJob.Schedule(inputDeps);
+            m_GhostSpawnInitSystem.newGhostsChangeHandle = inputDeps;
+        }
+        
+        return inputDeps;
     }
 }
 
