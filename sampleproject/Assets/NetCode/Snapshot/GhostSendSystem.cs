@@ -343,6 +343,12 @@ public class GhostSendSystem<TGhostSerializerCollection> : JobComponentSystem
                     maxCount = ghostChunks[chunk].Count;
             }
 
+            for (int i = 0; i < serialSpawnChunks.Length; i++)
+            {
+                if (serialSpawnChunks[i].chunk.Count > maxCount)
+                    maxCount = serialSpawnChunks[i].chunk.Count;
+            }
+
             var oldChunks = chunkSerializationData.GetKeyArray(Allocator.Temp);
             for (int i = 0; i < oldChunks.Length; ++i)
             {
