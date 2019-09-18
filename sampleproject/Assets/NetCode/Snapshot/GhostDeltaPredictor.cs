@@ -7,8 +7,23 @@ public struct GhostDeltaPredictor
 
     public GhostDeltaPredictor(uint tick, uint baseline0, uint baseline1, uint baseline2)
     {
-        predictFrac = 16 * (int)(baseline0 - baseline1) / (int)(baseline1 - baseline2);
-        applyFrac = 16 * (int)(tick - baseline0) / (int)(baseline0 - baseline1);
+        if (baseline1 == baseline2)
+        {
+            predictFrac = 16 * (int) (baseline0 - baseline1);
+        }
+        else
+        {
+            predictFrac = 16 * (int)(baseline0 - baseline1) / (int)(baseline1 - baseline2);
+        }
+
+        if (baseline0 == baseline1)
+        {
+            applyFrac = 16 * (int) (tick - baseline0);
+        }
+        else
+        {
+            applyFrac = 16 * (int)(tick - baseline0) / (int)(baseline0 - baseline1);
+        }
     }
 
     public int PredictInt(int baseline0, int baseline1, int baseline2)
